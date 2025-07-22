@@ -1,0 +1,198 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+  <meta charset="UTF-8">
+  <title>AI 德语学习文章生成器 + 阅读理解 + 整篇朗读</title>
+  <style>
+    body { font-family: sans-serif; max-width: 700px; margin: 40px auto; line-height: 1.6; }
+    textarea, select, input, button { width: 100%; margin-top: 10px; padding: 8px; font-size: 16px; }
+    section { background: #f9f9f9; padding: 15px; border-radius: 8px; margin-top: 20px; }
+    h2 { margin-top: 0; color: #333; }
+    .loading { color: #999; font-style: italic; }
+    .tts-controls { margin-top: 10px; }
+  </style>
+</head>
+<body>
+  <h1>AI 德语学习文章生成器</h1>
+
+  <label>请输入 Gemini 2.5 API Key：</label>
+  <input type="password" id="apiKey" placeholder="AIza 开头的 Key">
+
+  <label>主题：</label>
+  <input type="text" id="topic" placeholder="例如：Tiere, Umwelt, Reisen">
+
+  <label>难度等级：</label>
+  <select id="level">
+    <option value="A1">A1</option>
+    <option value="A2">A2</option>
+    <option value="B1">B1</option>
+    <option value="B2">B2</option>
+    <option value="C1">C1</option>
+  </select>
+
+  <button onclick="generateArticle()">生成文章</button>
+
+  <div id="result" class="loading"></div>
+
+  <!-- TTS 播放器 -->
+  <audio id="ttsPlayer" hidden></audio>
+
+  <script>
+    async function generateArticle() {
+      const apiKey = document.getElementById("apiKey").value.trim();
+      const topic = document.getElementById("topic").value.trim();
+      const level = document.getElementById("level").value;
+
+      if (!apiKey || !topic) {
+        alert("请先输入 Gemini API Key 和主题");
+        return;
+      }
+
+      const resultDiv = document.getElementById("result");
+      resultDiv.innerHTML = "<p class='loading'>⏳ 正在生成中，请稍候...</p>";
+
+      const userPrompt = `
+Du bist ein DaF-Lehrer.
+Bitte antworte GENAU in diesem Format:
+
+===德语文章===
+Schreibe einen kurzen deutschen Artikel (ca. 150 Wörter) über das Thema "${topic}". Der Text soll für Sprachniveau ${level} geeignet sein.
+
+===生词表===
+Liste 10 wichtige Wörter aus dem Text mit einer kurzen chinesischen Übersetzung.
+
+===中文翻译===
+Gib eine vollständige chinesische Übersetzung des Artikels.
+
+===阅读理解===
+Stelle 5 einfache Verständnisfragen zum Artikel. Jede Frage soll 3 Antwortmöglichkeiten (A, B, C) haben und zeige die richtige Antwort.
+`;
+
+      try {
+        const response = await fetch(
+          "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent",
+          {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              "X-goog-api-key": apiKey
+            },
+            body: JSON.stringify({
+              contents: [{ parts: [{ text: userPrompt }] }]
+            })
+          }
+        );
+
+        const data = await response.json();
+        console.log("Gemini 返回：", data);
+
+        const text = data?.candidates?.[0]?.content?.parts?.[0]?.text;
+        if (text) {
+          // ✅ 用正则提取内容
+          const articleMatch = text.match(/===德语文章===([\s\S]*?)===生词表===/);
+          const vocabMatch   = text.match(/===生词表===([\s\S]*?)===中文翻译===/);
+          const transMatch   = text.match(/===中文翻译===([\s\S]*?)===阅读理解===/);
+          const quizMatch    = text.match(/===阅读理解===([\s\S]*)/);
+
+          const article = articleMatch?.[1]?.trim() || "⚠️ 没找到文章";
+          const vocab   = vocabMatch?.[1]?.trim() || "⚠️ 没找到生词表";
+          const trans   = transMatch?.[1]?.trim() || "⚠️ 没找到中文翻译";
+          const quiz    = quizMatch?.[1]?.trim() || "⚠️ 没找到练习题";
+
+          let html = "";
+          html += `<section>
+            <h2>📖 德语文章</h2>
+            <p id="germanText">${article.replace(/\n/g, "<br>")}</p>
+            <div class="tts-controls">
+              <button onclick="startFullTTS()">🔊 整篇朗读</button>
+              <button onclick="pauseTTS()">⏸ 暂停</button>
+              <button onclick="resumeTTS()">▶ 继续</button>
+              <span id="ttsStatus"></span>
+            </div>
+          </section>`;
+
+          html += `<section><h2>📚 生词表</h2><p>${vocab.replace(/\n/g, "<br>")}</p></section>`;
+          html += `<section><h2>🇨🇳 中文翻译</h2><p>${trans.replace(/\n/g, "<br>")}</p></section>`;
+          html += `<section><h2>📝 阅读理解</h2><p>${quiz.replace(/\n/g, "<br>")}</p></section>`;
+
+          resultDiv.innerHTML = html;
+        } else {
+          resultDiv.innerHTML = `<p>❌ 返回错误：${JSON.stringify(data)}</p>`;
+        }
+      } catch (error) {
+        resultDiv.innerHTML = `<p>❌ 请求失败：${error}</p>`;
+      }
+    }
+
+    // ======== 整篇朗读控制 ========
+    let ttsChunks = [];
+    let ttsIndex = 0;
+    let isPaused = false;
+
+    function startFullTTS() {
+      const textElem = document.getElementById("germanText");
+      if (!textElem) return alert("⚠️ 没有德语文章可朗读");
+
+      const rawText = textElem.innerText.trim();
+      if (!rawText) return alert("⚠️ 文本为空");
+
+      // 分段
+      ttsChunks = [];
+      for (let i = 0; i < rawText.length; i += 180) {
+        ttsChunks.push(rawText.slice(i, i + 180));
+      }
+      ttsIndex = 0;
+      isPaused = false;
+
+      playNextChunk();
+    }
+
+    function playNextChunk() {
+      if (ttsIndex >= ttsChunks.length) {
+        document.getElementById("ttsStatus").innerText = "✅ 朗读完成";
+        return;
+      }
+
+      const segment = ttsChunks[ttsIndex];
+      const url = `https://translate.google.com/translate_tts?ie=UTF-8&q=${encodeURIComponent(segment)}&tl=de&client=tw-ob`;
+
+      const audioElem = document.getElementById("ttsPlayer");
+      audioElem.src = url;
+      audioElem.hidden = false;
+      audioElem.play();
+
+      document.getElementById("ttsStatus").innerText =
+        `▶ 正在朗读第 ${ttsIndex + 1}/${ttsChunks.length} 段`;
+
+      // 播放完 → 下一段
+      audioElem.onended = () => {
+        if (!isPaused) {
+          ttsIndex++;
+          playNextChunk();
+        }
+      };
+    }
+
+    function pauseTTS() {
+      const audioElem = document.getElementById("ttsPlayer");
+      audioElem.pause();
+      isPaused = true;
+      document.getElementById("ttsStatus").innerText = "⏸ 已暂停";
+    }
+
+    function resumeTTS() {
+      const audioElem = document.getElementById("ttsPlayer");
+      if (isPaused) {
+        isPaused = false;
+        audioElem.play(); // 如果当前段还没播完就继续播
+        document.getElementById("ttsStatus").innerText =
+          `▶ 继续朗读第 ${ttsIndex + 1}/${ttsChunks.length} 段`;
+        // 如果当前段已经结束，继续下一段
+        if (audioElem.ended) {
+          playNextChunk();
+        }
+      }
+    }
+  </script>
+</body>
+</html>
